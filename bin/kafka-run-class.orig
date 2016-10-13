@@ -138,10 +138,6 @@ do
     CLASSPATH="$CLASSPATH":"$file"
   fi
 done
-# classpath addition for releases with LSB-style layout
-CLASSPATH=$CLASSPATH:$base_dir/../share/java/kafka-##KAFKA_VERSION##/*
-
-
 shopt -u nullglob
 
 # JMX settings

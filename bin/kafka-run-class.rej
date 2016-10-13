@@ -1,0 +1,37 @@
+***************
+*** 152,164 ****
+  
+  # Log directory to use
+  if [ "x$LOG_DIR" = "x" ]; then
+-     LOG_DIR="$base_dir/logs"
+  fi
+  
+  # Log4j settings
+  if [ -z "$KAFKA_LOG4J_OPTS" ]; then
+    # Log to console. This is a tool.
+-   KAFKA_LOG4J_OPTS="-Dlog4j.configuration=file:$base_dir/config/tools-log4j.properties"
+  else
+    # create logs directory
+    if [ ! -d "$LOG_DIR" ]; then
+--- 156,176 ----
+  
+  # Log directory to use
+  if [ "x$LOG_DIR" = "x" ]; then
++     LOG_DIR="/var/log/kafka-##KAFKA_VERSION##"
+  fi
+  
+  # Log4j settings
+  if [ -z "$KAFKA_LOG4J_OPTS" ]; then
+    # Log to console. This is a tool.
++   LOG4J_CONFIG_NORMAL_INSTALL="/etc/kafka-##KAFKA_VERSION##/tools-log4j.properties"
++   LOG4J_CONFIG_ZIP_INSTALL="$base_dir/etc/kafka-##KAFKA_VERSION##/tools-log4j.properties"
++   if [ -e "$LOG4J_CONFIG_NORMAL_INSTALL" ]; then # Normal install layout
++     KAFKA_LOG4J_OPTS="-Dlog4j.configuration=file:${LOG4J_CONFIG_NORMAL_INSTALL}"
++   elif [ -e "${LOG4J_CONFIG_ZIP_INSTALL}" ]; then # Simple zip file layout
++     KAFKA_LOG4J_OPTS="-Dlog4j.configuration=file:${LOG4J_CONFIG_ZIP_INSTALL}"
++   else # Fallback to normal default
++     KAFKA_LOG4J_OPTS="-Dlog4j.configuration=file:$base_dir/config/tools-log4j.properties"
++   fi
+  else
+    # create logs directory
+    if [ ! -d "$LOG_DIR" ]; then

@@ -58,8 +58,8 @@ class ControllerContext(val zkUtils: ZkUtils) {
   val partitionsBeingReassigned: mutable.Map[TopicAndPartition, ReassignedPartitionsContext] = new mutable.HashMap
   val partitionsUndergoingPreferredReplicaElection: mutable.Set[TopicAndPartition] = new mutable.HashSet
 
-  private val offlinePartitionsCount = new AtomicInteger(0)
-  private val preferredReplicaImbalanceCount = new AtomicInteger(0)
+  val offlinePartitionsCount = new AtomicInteger(0)
+  val preferredReplicaImbalanceCount = new AtomicInteger(0)
 
   private var liveBrokersUnderlying: Set[Broker] = Set.empty
   private var liveBrokerIdsUnderlying: Set[Int] = Set.empty

@@ -111,6 +111,7 @@ class ReplicaStateMachine(controller: KafkaController) extends Logging {
         brokerRequestBatch.newBatch()
         replicas.foreach(r => handleStateChange(r, targetState, callbacks))
         brokerRequestBatch.sendRequestsToBrokers(controller.epoch)
+        controller.recomputePartitionMetrics()
       }catch {
         case e: Throwable => error("Error while moving some replicas to %s state".format(targetState), e)
       }

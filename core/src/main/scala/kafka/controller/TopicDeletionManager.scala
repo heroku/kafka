@@ -306,6 +306,7 @@ class TopicDeletionManager(controller: KafkaController,
     zkUtils.zkClient.deleteRecursive(getEntityConfigPath(ConfigType.Topic, topic))
     zkUtils.zkClient.delete(getDeleteTopicPath(topic))
     controllerContext.removeTopic(topic)
+    controllerContext.recomputePartitionMetrics(this)
   }
 
   /**

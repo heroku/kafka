@@ -23,6 +23,7 @@ import org.apache.kafka.common.requests.{AbstractRequest, AbstractResponse}
 import scala.collection._
 import com.yammer.metrics.core.{Gauge, Meter}
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 import kafka.admin.AdminUtils
 import kafka.admin.PreferredReplicaLeaderElectionCommand
@@ -56,6 +57,9 @@ class ControllerContext(val zkUtils: ZkUtils) {
   var partitionLeadershipInfo: mutable.Map[TopicAndPartition, LeaderIsrAndControllerEpoch] = mutable.Map.empty
   val partitionsBeingReassigned: mutable.Map[TopicAndPartition, ReassignedPartitionsContext] = new mutable.HashMap
   val partitionsUndergoingPreferredReplicaElection: mutable.Set[TopicAndPartition] = new mutable.HashSet
+
+  private val offlinePartitionsCount = new AtomicInteger(0)
+  private val preferredReplicaImbalanceCount = new AtomicInteger(0)
 
   private var liveBrokersUnderlying: Set[Broker] = Set.empty
   private var liveBrokerIdsUnderlying: Set[Int] = Set.empty
@@ -118,6 +122,42 @@ class ControllerContext(val zkUtils: ZkUtils) {
     allTopics -= topic
   }
 
+  def isActive(): Boolean = {
+    inLock(controllerLock) {
+      controllerChannelManager != null
+    }
+  }
+
+  def recomputePartitionMetrics(deleteTopicManager: TopicDeletionManager): Unit = {
+    offlinePartitionsCount.set(computeOfflinePartitionCount(deleteTopicManager))
+    preferredReplicaImbalanceCount.set(computePreferredLeaderImbalanceCount(deleteTopicManager))
+  }
+
+  def computeOfflinePartitionCount(deleteTopicManager: TopicDeletionManager): Int = {
+    inLock(controllerLock) {
+      if (!isActive)
+        0
+      else
+        partitionLeadershipInfo.count(p =>
+          (!liveOrShuttingDownBrokerIds.contains(p._2.leaderAndIsr.leader))
+            && (!deleteTopicManager.isTopicQueuedUpForDeletion(p._1.topic))
+        )
+    }
+  }
+
+  def computePreferredLeaderImbalanceCount(deleteTopicManager: TopicDeletionManager): Int = {
+    inLock(controllerLock) {
+      if (!isActive)
+        0
+      else
+        partitionReplicaAssignment.count {
+          case (topicPartition, replicas) =>
+            (partitionLeadershipInfo(topicPartition).leaderAndIsr.leader != replicas.head
+              && (!deleteTopicManager.isTopicQueuedUpForDeletion(topicPartition.topic))
+              )
+        }
+    }
+  }
 }
 
 
@@ -173,46 +213,27 @@ class KafkaController(val config: KafkaConfig, zkUtils: ZkUtils, val brokerState
   private val preferredReplicaElectionListener = new PreferredReplicaElectionListener(this)
   private val isrChangeNotificationListener = new IsrChangeNotificationListener(this)
 
+  // Metrics
+  private val activeControllerCount = new AtomicInteger(0)
+
   newGauge(
     "ActiveControllerCount",
     new Gauge[Int] {
-      def value() = if (isActive) 1 else 0
+      def value() = activeControllerCount.get
     }
   )
 
   newGauge(
     "OfflinePartitionsCount",
     new Gauge[Int] {
-      def value(): Int = {
-        inLock(controllerContext.controllerLock) {
-          if (!isActive)
-            0
-          else
-            controllerContext.partitionLeadershipInfo.count(p => 
-              (!controllerContext.liveOrShuttingDownBrokerIds.contains(p._2.leaderAndIsr.leader))
-              && (!deleteTopicManager.isTopicQueuedUpForDeletion(p._1.topic))
-            )
-        }
-      }
+      def value() = controllerContext.offlinePartitionsCount.get
     }
   )
 
   newGauge(
     "PreferredReplicaImbalanceCount",
     new Gauge[Int] {
-      def value(): Int = {
-        inLock(controllerContext.controllerLock) {
-          if (!isActive)
-            0
-          else
-            controllerContext.partitionReplicaAssignment.count {
-              case (topicPartition, replicas) => 
-                (controllerContext.partitionLeadershipInfo(topicPartition).leaderAndIsr.leader != replicas.head 
-                && (!deleteTopicManager.isTopicQueuedUpForDeletion(topicPartition.topic))
-                )
-            }
-        }
-      }
+      def value() = controllerContext.preferredReplicaImbalanceCount.get
     }
   )
 
@@ -222,6 +243,10 @@ class KafkaController(val config: KafkaConfig, zkUtils: ZkUtils, val brokerState
     val controllerListener = config.listeners.find(_.listenerName == config.interBrokerListenerName).getOrElse(
       throw new IllegalArgumentException(s"No listener with name ${config.interBrokerListenerName} is configured."))
     "id_%d-host_%s-port_%d".format(config.brokerId, controllerListener.host, controllerListener.port)
+  }
+
+  def recomputePartitionMetrics(): Unit = {
+    controllerContext.recomputePartitionMetrics(deleteTopicManager)
   }
 
   /**
@@ -389,6 +414,7 @@ class KafkaController(val config: KafkaConfig, zkUtils: ZkUtils, val brokerState
       if(controllerContext.controllerChannelManager != null) {
         controllerContext.controllerChannelManager.shutdown()
         controllerContext.controllerChannelManager = null
+        activeControllerCount.set(0)
       }
       // reset controller context
       controllerContext.epoch=0
@@ -402,11 +428,7 @@ class KafkaController(val config: KafkaConfig, zkUtils: ZkUtils, val brokerState
   /**
    * Returns true if this broker is the current controller.
    */
-  def isActive: Boolean = {
-    inLock(controllerContext.controllerLock) {
-      controllerContext.controllerChannelManager != null
-    }
-  }
+  def isActive = controllerContext.isActive
 
   /**
    * This callback is invoked by the replica state machine's broker change listener, with the list of newly started
@@ -749,6 +771,7 @@ class KafkaController(val config: KafkaConfig, zkUtils: ZkUtils, val brokerState
     initializePreferredReplicaElection()
     initializePartitionReassignment()
     initializeTopicDeletion()
+    recomputePartitionMetrics()
     info("Currently active brokers in the cluster: %s".format(controllerContext.liveBrokerIds))
     info("Currently shutting brokers in the cluster: %s".format(controllerContext.shuttingDownBrokerIds))
     info("Current list of topics in the cluster: %s".format(controllerContext.allTopics))
@@ -819,6 +842,7 @@ class KafkaController(val config: KafkaConfig, zkUtils: ZkUtils, val brokerState
   private def startChannelManager() {
     controllerContext.controllerChannelManager = new ControllerChannelManager(controllerContext, config, time, metrics, threadNamePrefix)
     controllerContext.controllerChannelManager.startup()
+    activeControllerCount.set(1)
   }
 
   def updateLeaderAndIsrCache(topicAndPartitions: Set[TopicAndPartition] = controllerContext.partitionReplicaAssignment.keySet) {
@@ -1347,6 +1371,7 @@ class IsrChangeNotificationListener(protected val controller: KafkaController) e
         val topicAndPartitions = currentChildren.flatMap(getTopicAndPartition).toSet
         if (topicAndPartitions.nonEmpty) {
           controller.updateLeaderAndIsrCache(topicAndPartitions)
+          controller.recomputePartitionMetrics()
           processUpdateNotifications(topicAndPartitions)
         }
       } finally {

@@ -39,6 +39,7 @@ import scala.collection.mutable
 import collection.Map
 import collection.Set
 import org.I0Itec.zkclient.exception.ZkNodeExistsException
+import org.apache.zookeeper.data.Stat
 
 trait AdminUtilities {
   def changeTopicConfig(zkUtils: ZkUtils, topic: String, configs: Properties)
@@ -587,8 +588,17 @@ object AdminUtils extends Logging with AdminUtilities {
    * sanitizedEntityName is <topic>, <broker>, <client-id>, <user> or <user>/clients/<client-id>.
    */
   def fetchEntityConfig(zkUtils: ZkUtils, rootEntityType: String, sanitizedEntityName: String): Properties = {
+    val data = fetchEntityDataAndStat(zkUtils, rootEntityType, sanitizedEntityName)._1.orNull
+    parseEntityData(data, rootEntityType, sanitizedEntityName)
+  }
+
+  def fetchEntityDataAndStat(zkUtils: ZkUtils, rootEntityType: String, sanitizedEntityName: String): (Option[String], Stat) = {
     val entityConfigPath = getEntityConfigPath(rootEntityType, sanitizedEntityName)
-    val str: String = zkUtils.zkClient.readData(entityConfigPath, true)
+    zkUtils.readDataMaybeNull(entityConfigPath)
+  }
+
+  def parseEntityData(str: String, rootEntityType: String, sanitizedEntityName: String): Properties = {
+    val entityConfigPath = getEntityConfigPath(rootEntityType, sanitizedEntityName)
     val props = new Properties()
     if (str != null) {
       Json.parseFull(str) match {

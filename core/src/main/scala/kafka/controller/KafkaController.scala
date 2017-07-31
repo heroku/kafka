@@ -16,13 +16,15 @@
  */
 package kafka.controller
 
+import java.util.Properties
+
 import org.apache.kafka.common.errors.{BrokerNotAvailableException, ControllerMovedException}
 import org.apache.kafka.common.protocol.ApiKeys
 import org.apache.kafka.common.requests.{AbstractRequest, AbstractResponse}
 
 import scala.collection._
 import com.yammer.metrics.core.{Gauge, Meter}
-import java.util.concurrent.TimeUnit
+import java.util.concurrent.{ConcurrentHashMap, TimeUnit}
 
 import kafka.admin.AdminUtils
 import kafka.admin.PreferredReplicaLeaderElectionCommand
@@ -172,6 +174,8 @@ class KafkaController(val config: KafkaConfig, zkUtils: ZkUtils, val brokerState
   private val partitionReassignedListener = new PartitionsReassignedListener(this)
   private val preferredReplicaElectionListener = new PreferredReplicaElectionListener(this)
   private val isrChangeNotificationListener = new IsrChangeNotificationListener(this)
+
+  private val topicConfigCache = new ConcurrentHashMap[String, (Integer, Properties)]()
 
   newGauge(
     "ActiveControllerCount",
@@ -1040,6 +1044,8 @@ class KafkaController(val config: KafkaConfig, zkUtils: ZkUtils, val brokerState
     }
   }
 
+
+
   /**
    * Removes a given partition replica from the ISR; if it is not the current
    * leader and there are sufficient remaining replicas in ISR.
@@ -1075,10 +1081,13 @@ class KafkaController(val config: KafkaConfig, zkUtils: ZkUtils, val brokerState
             // if the replica to be removed from the ISR is the last surviving member of the ISR and unclean leader election
             // is disallowed for the corresponding topic, then we must preserve the ISR membership so that the replica can
             // eventually be restored as the leader.
-            if (newIsr.isEmpty && !LogConfig.fromProps(config.originals, AdminUtils.fetchEntityConfig(zkUtils,
-              ConfigType.Topic, topicAndPartition.topic)).uncleanLeaderElectionEnable) {
-              info("Retaining last ISR %d of partition %s since unclean leader election is disabled".format(replicaId, topicAndPartition))
-              newIsr = leaderAndIsr.isr
+            if (newIsr.isEmpty) {
+              val topicConfig = fetchTopicConfig(topicAndPartition.topic)
+              val logConfig = LogConfig.fromProps(config.originals, topicConfig)
+              if (!logConfig.uncleanLeaderElectionEnable) {
+                info("Retaining last ISR %d of partition %s since unclean leader election is disabled".format(replicaId, topicAndPartition))
+                newIsr = leaderAndIsr.isr
+              }
             }
 
             val newLeaderAndIsr = new LeaderAndIsr(newLeader, leaderAndIsr.leaderEpoch + 1,
@@ -1106,6 +1115,26 @@ class KafkaController(val config: KafkaConfig, zkUtils: ZkUtils, val brokerState
       }
     }
     finalLeaderIsrAndControllerEpoch
+  }
+
+  def fetchTopicConfig(topic: String): Properties = {
+    val (data, stat) = AdminUtils.fetchEntityDataAndStat(zkUtils, ConfigType.Topic, topic)
+
+    data match {
+      case Some(str) =>
+        if (topicConfigCache.containsKey(topic)) {
+          val (version, props) = topicConfigCache.get()
+          if (version.equals(stat.getVersion)) {
+            return props
+          }
+        }
+        val props = AdminUtils.parseEntityData(data.orNull, ConfigType.Topic, topic)
+        topicConfigCache.put(topic, (stat.getVersion, props))
+        props
+      case None =>
+        topicConfigCache.remove(topic)
+        new Properties()
+    }
   }
 
   /**
